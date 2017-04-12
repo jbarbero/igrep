@@ -5,7 +5,7 @@ igrep is a convenient, caching wrapper around tesseract that lets you search thr
 
 Installation
 ------------
-1. Install tesseract and sha1sum
+1. Install tesseract
 2. Copy or symlink igrep and progressbar anywhere in your PATH
 
 Usage
@@ -38,4 +38,5 @@ Usage
 Known issues
 ------------
 - I haven't implemented getopt, so you can't combine multiple options into one
-- Progress bar doesn't work on GNU
+- Files with same names assumed to be same content, this will be fixed later
+- Progress bar broken on GNU
