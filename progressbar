@@ -1,0 +1,71 @@
+#!/bin/bash
+#
+# Author: Janos Barbero <jbarbero@cs.washington.edu>
+#
+# Renders a progress bar on screen
+# 
+
+# Export all functions and variables
+set -a
+
+# Usage and options
+# TODO: reduce forking
+width=60
+char='='
+usage="$0 [OPTIONS] TOTAL CURRENT [TEXT]
+
+Displays a progress bar from 0 to TOTAL with CURRENT completion and
+optional TEXT. Call this repeatedly to get an animated progress
+bar. The progress bar will complete once TOTAL equals CURRENT.
+
+Options:
+    -w | --width NUM    Make progress bar NUM chars wide, default $width
+"
+while [[ ${1:0:1} == - ]]; do
+    if [[ $1 == -h || $1 == --help ]]; then
+        echo "Usage: $usage" >&2
+        exit 1
+    elif [[ $1 == -w || $1 == --width ]]; then
+        if [[ $2 == "" || ${2:0:1} == - ]]; then
+            echo "Error: must specify argument to $1" >&2
+            exit 2
+        fi
+        width=$2
+        shift; shift
+    else
+        echo "Unrecognized option: $1" >&2
+        exit 3
+    fi
+done
+
+if [[ $2 == "" || $4 != "" ]]; then
+    echo "Usage: $usage" >&2
+    exit 4
+fi
+
+TOTAL=$1
+shift
+CURRENT=$1
+shift
+TEXT=$1
+shift
+
+fmtwidth=${#TOTAL}
+pct=$((100 * CURRENT / TOTAL))
+
+if [[ $CURRENT -ge $TOTAL ]]; then
+    barwidth=$width
+elif [[ $CURRENT -le 0 ]]; then
+    barwidth=0
+else
+    barwidth=$((width * CURRENT / TOTAL))
+fi
+bar=$(printf '=%.0s' $(eval echo {1..$barwidth}))
+bar=${bar/%=/>}
+
+printf "%${fmtwidth}d/%${fmtwidth}d [%-${width}s] %3d%%  %s\r" "$CURRENT" "$TOTAL" "$bar" "$pct" "$TEXT"
+
+if [[ $CURRENT -ge $TOTAL ]]; then
+    printf '\n'
+fi
+

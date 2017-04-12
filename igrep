@@ -343,6 +343,7 @@ if [[ $numnew -gt 0 ]]; then
             }
             /___END___/ {
                 printf "progressbar %d %d \"Scanning images...\" >&2\n", ENVIRON["numnew"], ++jj
+                fflush()
             }
             {
                 print > cachenew
