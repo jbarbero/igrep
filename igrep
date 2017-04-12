@@ -260,15 +260,9 @@ pattern="$1"
 shift
 
 # Can wrap these later if needed, e.g. if tesseract is not available
-# or because of the sha1sum collisions
 if ! which tesseract &>/dev/null; then
     echo "Error: please install tesseract first (tesseract-ocr or tesseract package)"
     exit 4
-fi
-
-if ! which sha1sum &>/dev/null; then
-    echo "Error: please install sha1sum first"
-    exit 5
 fi
 
 ###Main
