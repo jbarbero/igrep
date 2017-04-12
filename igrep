@@ -1,0 +1,417 @@
+#!/bin/bash
+#
+# Author: Janos Barbero <jbarbero@cs.washington.edu>
+#
+# Searches inside text of images using tesseract
+#
+
+# Export all functions and variables
+set -a
+
+# Simpler lexical sorting and searching
+export LC_ALL=C
+
+###Functions
+# Length of a string
+len() {
+    #a=${@}
+    #echo "argc: $#, len(args): ${#a}" >&2
+    echo -n "$1" | grep -c ^
+}
+
+# Platform-agnostic stat
+sstat() {
+    local _STAT
+    if [[ $_STAT == "" ]]; then
+        if stat --help &>/dev/null; then
+            _STAT=gnu
+        else
+            _STAT=bsd
+        fi
+    fi
+
+    if [[ $_STAT == gnu ]]; then
+        stat -c ':%s:%n:' "$@"
+    else
+        stat -f ':%z:%N:' "$@"
+    fi
+}
+
+merge_cache() {
+    cache=$1
+    if [[ -f $cache.new ]]; then
+        printf '\n' >&2
+        echo "Merging $cache.new" >&2
+        numcache=$(cat $cache | awk -F: 'NF > 3' | sort -s -t: -k1,3 -u | grep -c ^)
+        numnew=$(cat $cache.new | awk -F: 'NF > 3' | sort -s -t: -k1,3 -u | grep -c ^)
+        cat $cache $cache.new | awk -F: 'NF > 3' | sort -s -t: -k1,3 | uniq > $cache.tmp && mv $cache.tmp $cache && rm -f $cache.new
+        nummerged=$(cat $cache | awk -F: 'NF > 3' | sort -s -t: -k1,3 -u | grep -c ^)
+
+        if [[ $((numnew + numfound)) != $numstat ]]; then
+            echo "Internal error: cache old ($numcache) + new ($numnew) not equal to merged ($nummerged)" >&2
+            echo " numcache: $numcache" >&2
+            echo "   numnew: $numnew" >&2
+            echo "nummerged: $nummerged" >&2
+            exit 8
+        fi
+    fi
+}
+
+cleanup() {
+    cache=$1
+
+    merge_cache "$1"
+}
+
+ocrproc() {
+    set -a
+    if [[ $2 != "" ]]; then
+        name=$1
+        size=$2
+    else
+        IFS=:
+        read -r null size name <<< "$1"
+        IFS=$OLDIFS
+    fi
+
+    base=$(basename "$name")
+
+    prefix=":$size:$base:"
+
+    out=$(echo '___BEGIN___' && \
+        tesseract -c debug_file=/dev/null "$name" stdout && \
+        echo '___END___')
+
+    #if echo -n "$out" | grep -c '___BEGIN___' && echo -n "$out" | grep -c '___END___'; then
+    if [[ $out =~ '___BEGIN___' && $out =~ '___END___' ]]; then
+        out=$(echo "$out" | awk '/[^[:space:]]/ {print ENVIRON["prefix"] $0}')
+        echo "$out"
+    fi
+}
+
+search() {
+    pattern=$1
+    files=$2
+    cache=$3
+
+    # Search entire cache (old)
+    #cat "$cache" | awk -F: '$4 !~ /^(___BEGIN___|___END___)$/' | grep "$pattern"
+
+    # echo "$files" | sed -e 's/$/@/' | fgrep 2017-03 | head -10 | cat -n >&2
+    # cat "$cache" | sed -e 's/:/:@/3' | fgrep 2017-03 | head -10 | cat -n >&2
+    #cat "$cache" | awk -F: '$4 !~ /^(___BEGIN___|___END___)$/' | sed -e 's/:/:@/3' | join -t '@' <(echo -n "$files") - | eval "grep $grep_opts \"$pattern\""
+    cat "$cache" | awk -F: '$4 !~ /^(___BEGIN___|___END___)$/' | sed -e 's/:/:@/3' | join -t '@' <(echo -n "$files") - | eval "grep $grep_opts \"$pattern\""
+    #echo "grep $grep_opts \"$pattern\"" >&2
+}
+
+function timer_now {
+    if [[ $GDATE_SET == "" ]]; then
+        export GDATE=$(which gdate 2>&-)
+        export GDATE_SET=1
+    fi
+
+    if [[ $GDATE != "" ]]; then
+        $GDATE +"%s %N"
+    elif [[ $PLATFORM_NAME == Linux ]]; then
+        date +"%s %N"
+    elif [[ $PLATFORM_NAME == Darwin ]]; then
+        date +"%s 0"
+    fi
+}
+
+function timer_start {
+    shopt -s extglob
+    export TIMER_DISPLAY=
+    t_start=${t_start:-$(timer_now)}
+    #echo "timer_start: [$t_start]"
+}
+
+function timer_elapsed {
+    # Need extglob for string substitution here
+    shopt -s extglob
+
+    export TIMER_DISPLAY=
+    if [[ $t_start == "" ]]; then
+        return
+    fi
+
+    t_now=$(timer_now)
+
+    # Strip zeroes (requires extglob)
+    t_now=${t_now// +(0)/ }
+    t_start=${t_start// +(0)/ }
+
+    read s_0 ns_0 <<< "$t_start"
+    read s_1 ns_1 <<< "$t_now"
+
+    local ns_in_s=1000000000
+    local d_ns=$((s_1*ns_in_s + ns_1 - s_0*ns_in_s - ns_0))
+
+    local ns=$((  d_ns %  1000))
+    local us=$(( (d_ns /= 1000) % 1000))
+    local ms=$(( (d_ns /= 1000) % 1000))
+    local s=$((  (d_ns /= 1000) % 60))
+    local m=$((  (d_ns /= 60)   % 60))
+    local h=$((  (d_ns /= 60) % 24))
+    local d=$((   d_ns /  24))
+    #echo "ns: $ns; us: $us; ms: $ms; s: $s; m: $m; h: $h"
+
+    # Goal: always show 6 characters
+    if   ((d  >  0));   then    t_show=$(printf "%2dd%02dh" $d  $h)
+    elif ((h  >  0));   then    t_show=$(printf "%2dh%02dm" $h  $m)
+    elif ((m  >  0));   then    t_show=$(printf "%2dm%02ds" $m  $s)
+    elif ((s  >= 10));  then    t_show=$(printf "%d.%002ds" $s  $((ms/10)))
+    elif ((s  >  0));   then    t_show=$(printf "%d.%003ds" $s  $ms)
+    elif ((ms >= 100)); then    t_show=$(printf "%4dms"     $ms)
+    elif ((ms >= 10));  then    t_show=$(printf "%d.%dms"   $ms $((us/100)))
+    elif ((ms >  0));   then    t_show=$(printf "%d.%02dms" $ms $((us/10)))
+    elif ((us >= 100)); then    t_show=$(printf "%4dus"     $us)
+    elif ((us >= 10));  then    t_show=$(printf "%d.%dus"   $us $((ns/100)))
+    elif ((us >  0));   then    t_show=$(printf "%d.%02dus" $us $((ns/10)))
+    else                        t_show=$(printf "%4dns"     $ns)
+    fi
+
+    #TIMER_DISPLAY=" [$t_show]"
+    echo "$t_show"
+
+    unset t_start
+}
+
+###Args
+
+# Config
+IMGEXT='\.(jpg|jpeg|png|pbm|bmp|tif|tiff|xbm)$'
+
+# Use xargs for thread pooling
+xargsthreads=1
+
+# Usage, options, and args
+threads=10
+timing=1
+grep_opts=""
+
+# TODO: split grep opts into ones around searching the index:
+#   -E -F -G -i -v -w
+# and those around searching within a matched file:
+#   -A -B -C -c --colour -m -x
+usage="$0 [OPTIONS] PATTERN FILE ...
+
+Searches inside text of images using tesseract, caches results by
+file contents.
+
+Options:
+    -t | --threads NUM      Number of threads, default $threads
+    --timing                Print timing information
+
+The following options are passed directly to grep without interpretation:
+    -A NUM                  (grep) Print NUM lines of context after
+    -B NUM                  (grep) Print NUM lines of context before
+    -C NUM                  (grep) Print NUM lines of context before and after
+    -c                      (grep) Print number of matches only
+    --colour WHEN           (grep) Use colour WHEN: {always|never|auto}
+    -E                      (grep) Use extended regular expressions
+    -F                      (grep) Use fixed string patterns
+    -G                      (grep) Use basic regular expressions
+    -i                      (grep) Use case-insensitive searches
+    -m NUM                  (grep) Stop searching after NUM matches
+    -v                      (grep) Invert match sense
+    -w                      (grep) Match pattern only at word boundaries
+    -x                      (grep) Match entire line
+"
+while [[ ${1:0:1} == - ]]; do
+#while [[ $1 != "" ]]; do
+    if [[ $1 == -h || $1 == --help ]]; then
+        echo "Usage: $usage" >&2
+        exit 1
+    elif [[ $1 == -t || $1 == -threads ]]; then
+        if [[ $2 == "" || ${2:0:1} == - ]]; then
+            echo "Error: must specify argument to $1" >&2
+            exit 2
+        fi
+        threads=$2
+        shift; shift
+    elif [[ $1 == --timing ]]; then
+        timing=1
+        shift
+    elif [[ $1 == -c || $1 == -E || $1 == -F || $1 == -G || $1 == -i ||
+        $1 == -v || $1 == -w || $1 == -x ]]; then
+        grep_opts="$grep_opts $1"
+        shift
+    elif [[ $1 == -A || $1 == -B || $1 == -C || $1 == --colour ||
+        $1 == -m ]]; then
+        grep_opts="$grep_opts $1 \"$2\""
+        shift; shift
+    elif [[ $1 == -- ]]; then
+        shift
+        break
+    else
+        echo "Unrecognized option: $1" >&2
+        exit 2
+    fi
+done
+
+if [[ $1 == "" ]]; then
+    echo "Please specify PATTERN" >&2
+    echo "Usage: $usage" >&2
+    exit 3
+fi
+
+pattern="$1"
+shift
+
+# Can wrap these later if needed, e.g. if tesseract is not available
+# or because of the sha1sum collisions
+if ! which tesseract &>/dev/null; then
+    echo "Error: please install tesseract first (tesseract-ocr or tesseract package)"
+    exit 4
+fi
+
+if ! which sha1sum &>/dev/null; then
+    echo "Error: please install sha1sum first"
+    exit 5
+fi
+
+###Main
+
+OLDIFS=$IFS
+BASE="$PWD"
+IDIR="$HOME/.igrep"
+CACHE="$IDIR/cache"
+
+trap "cleanup $CACHE" EXIT
+
+mkdir -p $IDIR
+if [[ $? != 0 ]]; then
+    echo "Error: failed to create $IDIR" >&2
+    exit 3
+fi
+
+if [[ ! -f $CACHE ]]; then
+    touch "$CACHE"
+fi
+
+# while :;do for s in / - \\ \|; do printf "\r$s";sleep .1;done;done
+
+# This is more complicated than doing a `for file;` loop, but lets
+# us control the list and order of files
+
+timer_start
+
+files=$(ls "$@" 2>&-)
+files=$(echo "$files" | egrep "$IMGEXT")
+
+[[ $timing == 1 ]] && echo "[$(timer_elapsed)] Listing files" >&2
+filesstat=$(echo "$files" | tr '\n' '\0' | xargs -0 bash -c 'sstat "$@"' | sort)
+
+[[ $timing == 1 ]] && echo "[$(timer_elapsed)] Reading file cache" >&2
+filescache=$(cat "$CACHE" 2>&- | awk -F: '/___END___/ && !seen[$2,$3]++ {printf ":%s:%s:\n", $2, $3}')
+
+if [[ $filescache != "" ]]; then
+    [[ $timing == 1 ]] && echo "[$(timer_elapsed)] Listing found files" >&2
+    #filesfound=$(echo -n "$filesstat" | grep -x -Ff <(echo -n "$filescache"))
+    filesfound=$(comm -1 -2 <(echo "$filesstat") <(echo "$filescache"))
+    [[ $timing == 1 ]] && echo "[$(timer_elapsed)] Listing new files" >&2
+    #filesnew=$(echo -n "$filesstat" | grep -v -x -Ff <(echo -n "$filescache"))
+    filesnew=$(comm -2 -3 <(echo "$filesstat") <(echo "$filescache"))
+else
+    filesfound=""
+    filesnew="$filesstat"
+fi
+
+numnew=$(len "$filesnew")
+numfound=$(len "$filesfound")
+numstat=$(len "$filesstat")
+numcache=$(len "$filescache")
+
+if [[ $((numnew + numfound)) != $numstat ]]; then
+    echo "Internal error: new ($numnew) + found ($numfound) not equal to input ($numstat)" >&2
+    echo "filescache: $numcache" >&2
+    echo " filesstat: $numstat" >&2
+    echo "filesfound: $numfound" >&2
+    echo "  filesnew: $numnew" >&2
+    exit 7
+fi
+
+# TODO: progressbar not working on GNU
+if [[ $numnew -gt 0 ]]; then
+    [[ $timing == 1 ]] && echo "[$(timer_elapsed)] Scanning $numnew new images" >&2
+
+    if [[ $threads != 1 && $xargsthreads == 1 ]]; then
+        echo "$filesnew" | tr '\n' '\0' | xargs -0 -n1 -P$threads bash -c 'ocrproc "$@"' -- | awk '
+            BEGIN {
+                cachenew = ENVIRON["CACHE"] ".new"
+            }
+            /___END___/ {
+                printf "progressbar %d %d \"Scanning images...\" >&2\n", ENVIRON["numnew"], ++jj
+            }
+            {
+                print > cachenew
+            }
+            END {
+                close(cachenew)
+            }' | bash
+    else
+        ii=0
+        IFS=:
+        while read -r null size name; do
+            ((ii++))
+
+            if [[ $threads == 1 ]]; then
+                ocrproc "$name" "$size"
+                progressbar $numnew $ii "Scanning images..." >&2
+            else
+                ocrproc "$name" "$size" &
+            fi
+
+            if [[ $threads == 1 ]]; then
+                true
+            else
+                if [[ $(jobs | grep -c ^) -lt $threads ]]; then
+                    progressbar $numnew $ii "Scanning images, $(jobs | grep -c ^) threads running" >&2
+                else
+                    while [[ $(jobs | grep -c ^) -ge $threads ]]; do
+                        progressbar $numnew $ii "Scanning images, $(jobs | grep -c ^) threads running" >&2
+                        sleep 1
+                    done
+                fi
+            fi
+        done <<< "$filesnew" > $CACHE.new
+        IFS=$OLDIFS
+
+        if [[ $threads == 1 ]]; then
+            progressbar $numnew $ii "Scanning images..." >&2
+        else
+            if [[ $(jobs | grep -c ^) -gt 0 ]]; then
+                echo "Waiting for $(jobs | grep -c ^) threads to complete" >&2
+                wait
+            fi
+        fi
+    fi
+
+    merge_cache "$CACHE"
+fi
+
+[[ $timing == 1 ]] && echo "[$(timer_elapsed)] Searching transcripts" >&2
+IFS=:
+while read -r null size name line; do
+    line=${line:1}
+    #echo "[$null][$size][$name][$line]"
+    cur="$size:$name"
+    if [[ $last != $cur ]]; then
+        if [[ $last != "" ]]; then
+            echo
+        fi
+        echo "$name"
+        last=$cur
+    fi
+    echo "$line"
+done < <(search "$pattern" "$filesfound" "$CACHE")
+IFS=$OLDIFS
+
+[[ $timing == 1 ]] && echo "[$(timer_elapsed)] Done" >&2
+
+# TODO: portable getopt
+
+# TODO: Optionally, allow the user to open them with "open"
+# TODO: print features from deleted or missing files
+
